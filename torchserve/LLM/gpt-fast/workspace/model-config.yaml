@@ -1,0 +1,18 @@
+#frontend settings
+minWorkers: 1
+maxWorkers: 1
+maxBatchDelay: 200
+responseTimeout: 10800
+parallelType: "tp"
+deviceType: "gpu"
+continuousBatching: false
+
+handler:
+  model_name: "meta-llama/Llama-2-70b-chat-hf"
+  converted_ckpt_dir: "checkpoints/meta-llama/Llama-2-70b-chat-hf/model.pth"
+  draft_model_name: "meta-llama/Llama-2-7b-chat-hf"
+  draft_checkpoint_dir: "checkpoints/meta-llama/Llama-2-7b-chat-hf/model.pth"
+  quantization: int8
+  max_new_tokens: 50
+  compile: true
+  speculate_k: 8
