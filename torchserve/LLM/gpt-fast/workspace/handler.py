@@ -6,6 +6,9 @@ from typing import Optional
 from pathlib import Path
 import subprocess
 import shutil
+import sys
+
+sys.path.append('/gpt-fast')
 
 import torch
 from generate import _load_model, decode_one_token, encode_tokens, prefill, speculative_decode
@@ -45,23 +48,26 @@ class GptHandler(BaseHandler):
 
         quantization = ctx.model_yaml_config["handler"]["quantization"]
         model_dir = ctx.system_properties.get("model_dir")
+
         model_name = ctx.model_yaml_config["handler"]["model_name"]
         os.environ["MODEL_REPO"] = model_name
         cmd = ["sh", "scripts/prepare.sh", model_name]
-        run_script = subprocess.Popen(cmd, cwd="/home/model-server/gpt-fast")
+        run_script = subprocess.Popen(cmd, cwd="/gpt-fast")
         run_script.wait()
+
+        draft_model_name = ctx.model_yaml_config["handler"]["draft_model_name"]
+        os.environ["draft_model_name"] = draft_model_name
+        cmd = ["sh", "scripts/prepare.sh", draft_model_name]
+        run_script = subprocess.Popen(cmd, cwd="/gpt-fast")
+        run_script.wait()
+        shutil.move("/gpt-fast/checkpoints", f'{model_dir}/')
+
         checkpoint_path = Path(f'{model_dir}/{ctx.model_yaml_config["handler"]["converted_ckpt_dir"]}')
         assert checkpoint_path.is_file(), checkpoint_path
 
         tokenizer_path = checkpoint_path.parent / "tokenizer.model"
         assert tokenizer_path.is_file(), tokenizer_path
 
-        draft_model_name = ctx.model_yaml_config["handler"]["draft_model_name"]
-        os.environ["draft_model_name"] = draft_model_name
-        cmd = ["sh", "scripts/prepare.sh", draft_model_name]
-        run_script = subprocess.Popen(cmd, cwd="/home/model-server/gpt-fast")
-        run_script.wait()
-        shutil.move("/home/model-server/gpt-fast/checkpoints", f'{model_dir}/')
         draft_checkpoint_path = ctx.model_yaml_config["handler"].get("draft_checkpoint_dir", None)
         draft_checkpoint_path = Path(f'{model_dir}/{draft_checkpoint_path}') if draft_checkpoint_path else None
 
