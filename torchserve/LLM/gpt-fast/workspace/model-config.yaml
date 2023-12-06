@@ -7,6 +7,9 @@ parallelType: "tp"
 deviceType: "gpu"
 continuousBatching: false
 
+torchrun:
+  nproc-per-node: 8
+
 handler:
   model_name: "meta-llama/Llama-2-70b-chat-hf"
   converted_ckpt_dir: "checkpoints/meta-llama/Llama-2-70b-chat-hf/model.pth"
