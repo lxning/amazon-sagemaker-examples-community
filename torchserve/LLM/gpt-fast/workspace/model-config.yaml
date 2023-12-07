@@ -16,6 +16,6 @@ handler:
   draft_model_name: "meta-llama/Llama-2-7b-chat-hf"
   draft_checkpoint_dir: "checkpoints/meta-llama/Llama-2-7b-chat-hf/model.pth"
   quantization: int8
-  max_new_tokens: 50
+  max_new_tokens: 200
   compile: true
-  speculate_k: 8
+  speculate_k: 5
