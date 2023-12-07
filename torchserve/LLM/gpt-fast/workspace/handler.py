@@ -11,8 +11,7 @@ import sys
 sys.path.append('/home/model-server/gpt-fast')
 
 import torch
-from generate import _load_model, decode_one_token, encode_tokens, prefill, speculative_decode, model_forward
-from model import Transformer
+from generate import _load_model, decode_one_token, encode_tokens, prefill, model_forward, multinomial_sample_one_no_sync
 from sentencepiece import SentencePieceProcessor
 
 from ts.handler_utils.timer import timed
@@ -103,13 +102,12 @@ class GptHandler(BaseHandler):
                 torch._inductor.config.triton.cudagraph_trees = False 
 
             if self.is_speculative:
-                global model_forward, logits_to_prob
-                model_forward = torch.compile(model_forward, mode="reduce-overhead", fullgraph=True)
+                self.model_forward = torch.compile(model_forward, mode="reduce-overhead", fullgraph=True)
             self.decode_one_token = torch.compile(
-                self.decode_one_token, mode="reduce-overhead", fullgraph=True
+                decode_one_token, mode="reduce-overhead", fullgraph=True
             )
 
-            self.prefill = torch.compile(self.prefill, fullgraph=True, dynamic=True)
+            self.prefill = torch.compile(prefill, fullgraph=True, dynamic=True)
 
 
         self.initialized = True
@@ -167,7 +165,7 @@ class GptHandler(BaseHandler):
         y = self.generate(
             prompt=input_data["encoded"],
             max_new_tokens=input_data["max_new_tokens"],
-            speculate_k = self.speculate_k,
+            speculate_k=self.speculate_k,
             callback=call_me,
             temperature=input_data["temperature"],
             top_k=input_data["top_k"],
@@ -177,6 +175,59 @@ class GptHandler(BaseHandler):
 
     def postprocess(self, y):
         return [""]
+
+    def speculative_decode(
+        self,
+        cur_token: torch.Tensor,
+        input_pos: int,
+        speculate_k: int,
+        **sampling_kwargs
+    ) -> torch.Tensor:
+        # draft model inference sequentially
+        device = cur_token.device
+        orig_input_pos = torch.tensor([input_pos], dtype=torch.int64, device=cur_token.device)
+        draft_tokens, draft_probs = self.decode_n_tokens(
+            cur_token=cur_token.view(1, -1),
+            input_pos=orig_input_pos.clone(),
+            num_new_tokens=speculate_k,
+            **sampling_kwargs)
+
+        draft_tokens = torch.cat(draft_tokens)
+        # parallel inference on target model using draft tokens
+        target_logits = self.model_forward(
+            self.model,
+            torch.cat([cur_token.view(1), draft_tokens]).view(1, -1),
+            torch.arange(input_pos, input_pos + speculate_k + 1, device=cur_token.device)
+        )
+        target_probs = self.logits_to_probs(target_logits[0], **sampling_kwargs)
+        draft_probs = torch.stack(draft_probs)
+        # q: target prob, p: draft prob
+        # q >= p: always accept draft token
+        # q < p: q/p prob to accept draft token
+        p = draft_probs[torch.arange(0, speculate_k, device=device), draft_tokens]
+        q = target_probs[torch.arange(0, speculate_k, device=device), draft_tokens]
+        accept_draft_prob = torch.minimum(torch.ones(()), q[:speculate_k] / p)
+        rejected_locations = (torch.rand_like(accept_draft_prob) > accept_draft_prob).nonzero()
+
+        if rejected_locations.shape[0] == 0:  # All draft tokens have been accepted
+            accept_length = speculate_k + 1
+            last_token = multinomial_sample_one_no_sync(target_probs[-1])
+            # fill last token into draft model
+            self.model_forward(
+                self.draft_model,
+                draft_tokens[-1].view(1, -1),
+                orig_input_pos + speculate_k,
+            )
+            return torch.cat([draft_tokens, last_token])
+        else:
+            accept_length = rejected_locations[0].item()
+            p = draft_probs[accept_length]
+            q = target_probs[accept_length]
+            new = q - p
+            new = torch.where(new > 0, new, 0.0)
+            new = new / new.sum()
+            next_token = multinomial_sample_one_no_sync(new)
+            return torch.cat([draft_tokens[:accept_length], next_token])
 
     @torch.no_grad()
     def generate(
@@ -236,8 +287,8 @@ class GptHandler(BaseHandler):
             while input_pos < T_new - 1:
                 cur_token = next_token.view(())
 
-                next_tokens = speculative_decode(
-                    self.model, self.draft_model, cur_token, input_pos, speculate_k, **sampling_kwargs
+                next_tokens = self.speculative_decode(
+                    cur_token, input_pos, speculate_k, **sampling_kwargs
                 )
 
                 accept_counts[len(next_tokens) - 1] += 1
